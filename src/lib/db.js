@@ -104,7 +104,14 @@ export async function getPhoto(photoId) {
 }
 
 export async function getPendingSyncEntries() {
-  return db.entries.where('syncStatus').equals('pending').toArray();
+  // Retry both 'pending' (never yet attempted) and 'error' (attempted but
+  // failed) entries. Excluding 'error' entries from future attempts would
+  // mean a single transient failure — a backend restart, a momentary
+  // network blip, anything short-lived — permanently strands that entry
+  // offline with no way to recover except manually re-editing it. Since
+  // this app's whole point is surviving unreliable connectivity, a failed
+  // sync must be retried automatically, not given up on after one attempt.
+  return db.entries.where('syncStatus').anyOf(['pending', 'error']).toArray();
 }
 
 // Insert an entry that came FROM the server (e.g. during a pull-down after

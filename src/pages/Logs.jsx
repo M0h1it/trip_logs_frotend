@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { getAllEntriesGrouped, getPhoto, deleteEntry, localDateStr } from '../lib/db';
 import { api } from '../lib/api';
 import { onSyncStatusChange } from '../lib/sync';
@@ -219,8 +219,16 @@ function EntryCard({ entry, onClick }) {
         )}
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6, flexShrink: 0 }}>
-        {entry.syncStatus === 'pending' && (
-          <span title="Not yet synced" style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--warn)' }} />
+        {(entry.syncStatus === 'pending' || entry.syncStatus === 'error') && (
+          <span
+            title={entry.syncStatus === 'error' ? 'Sync failed — will retry automatically' : 'Not yet synced'}
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: '50%',
+              background: entry.syncStatus === 'error' ? 'var(--error)' : 'var(--warn)',
+            }}
+          />
         )}
         {entry.needsOcr && (
           <span
@@ -247,6 +255,9 @@ function EntryDetail({ entry, onBack, onDeleted }) {
   // from either a local blob (on this device) or the server path (synced
   // from elsewhere), same fallback pattern used for card photos.
   const [resolvedProducts, setResolvedProducts] = useState([]);
+  // The photo URL currently open in the full-screen zoomable viewer, or
+  // null when the viewer is closed. Shared by both card and product photos.
+  const [lightboxUrl, setLightboxUrl] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -337,7 +348,18 @@ function EntryDetail({ entry, onBack, onDeleted }) {
             }}
           >
             {cardUrls.map((url, i) => (
-              <img key={i} src={url} alt="Business card" style={{ width: '100%', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }} />
+              <img
+                key={i}
+                src={url}
+                alt="Business card"
+                onClick={() => setLightboxUrl(url)}
+                style={{
+                  width: '100%',
+                  borderRadius: 'var(--radius)',
+                  border: '1px solid var(--border)',
+                  cursor: 'zoom-in',
+                }}
+              />
             ))}
           </div>
         </div>
@@ -368,7 +390,16 @@ function EntryDetail({ entry, onBack, onDeleted }) {
                   <img
                     src={product.url}
                     alt="Product"
-                    style={{ width: 72, height: 72, objectFit: 'cover', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', flexShrink: 0 }}
+                    onClick={() => setLightboxUrl(product.url)}
+                    style={{
+                      width: 72,
+                      height: 72,
+                      objectFit: 'cover',
+                      borderRadius: 'var(--radius-sm)',
+                      border: '1px solid var(--border)',
+                      flexShrink: 0,
+                      cursor: 'zoom-in',
+                    }}
                   />
                 )}
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -417,6 +448,8 @@ function EntryDetail({ entry, onBack, onDeleted }) {
       >
         Delete entry
       </button>
+
+      {lightboxUrl && <PhotoLightbox url={lightboxUrl} onClose={() => setLightboxUrl(null)} />}
     </div>
   );
 }
@@ -532,5 +565,173 @@ function SectionLabel({ children }) {
     <h2 style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-dim)', margin: '0 0 8px' }}>
       {children}
     </h2>
+  );
+}
+
+// Full-screen photo viewer with pinch-to-zoom (touch), double-tap-to-zoom,
+// and mouse wheel zoom (for laptop use/testing). Used for both card and
+// product photos — tapping any thumbnail opens the same viewer.
+function PhotoLightbox({ url, onClose }) {
+  const [scale, setScale] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const pinchState = useRef(null); // { startDist, startScale }
+  const panState = useRef(null); // { startX, startY, startOffsetX, startOffsetY }
+  const lastTapRef = useRef(0);
+  const containerRef = useRef(null);
+
+  function resetZoom() {
+    setScale(1);
+    setOffset({ x: 0, y: 0 });
+  }
+
+  function clampScale(s) {
+    return Math.min(Math.max(s, 1), 5);
+  }
+
+  function distanceBetween(touches) {
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function handleTouchStart(e) {
+    if (e.touches.length === 2) {
+      pinchState.current = { startDist: distanceBetween(e.touches), startScale: scale };
+      panState.current = null;
+    } else if (e.touches.length === 1) {
+      const now = Date.now();
+      if (now - lastTapRef.current < 300) {
+        // Double tap: toggle between zoomed-in and fit-to-screen.
+        if (scale > 1) resetZoom();
+        else {
+          setScale(2.5);
+          setOffset({ x: 0, y: 0 });
+        }
+      }
+      lastTapRef.current = now;
+
+      if (scale > 1) {
+        panState.current = {
+          startX: e.touches[0].clientX,
+          startY: e.touches[0].clientY,
+          startOffsetX: offset.x,
+          startOffsetY: offset.y,
+        };
+      }
+    }
+  }
+
+  function handleTouchMove(e) {
+    if (e.touches.length === 2 && pinchState.current) {
+      e.preventDefault();
+      const newDist = distanceBetween(e.touches);
+      const ratio = newDist / pinchState.current.startDist;
+      setScale(clampScale(pinchState.current.startScale * ratio));
+    } else if (e.touches.length === 1 && panState.current && scale > 1) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - panState.current.startX;
+      const dy = e.touches[0].clientY - panState.current.startY;
+      setOffset({ x: panState.current.startOffsetX + dx, y: panState.current.startOffsetY + dy });
+    }
+  }
+
+  function handleTouchEnd(e) {
+    if (e.touches.length < 2) pinchState.current = null;
+    if (e.touches.length === 0) panState.current = null;
+  }
+
+  function handleWheel(e) {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? -0.2 : 0.2;
+    setScale((s) => clampScale(s + delta));
+  }
+
+  // React's onWheel prop attaches a passive listener by default in modern
+  // browsers, which silently blocks preventDefault() from working — the
+  // page would scroll behind the lightbox instead of the image zooming.
+  // Attaching the listener manually with { passive: false } is required to
+  // actually stop that background scroll during a zoom gesture.
+  useEffect(() => {
+    const node = containerRef.current;
+    if (!node) return;
+    node.addEventListener('wheel', handleWheel, { passive: false });
+    return () => node.removeEventListener('wheel', handleWheel);
+  }, [scale]);
+
+  function handleDoubleClick() {
+    if (scale > 1) resetZoom();
+    else setScale(2.5);
+  }
+
+  return (
+    <div
+      ref={containerRef}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,0.92)',
+        zIndex: 1000,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        touchAction: 'none',
+        overflow: 'hidden',
+      }}
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+    >
+      <button
+        onClick={onClose}
+        aria-label="Close"
+        style={{
+          position: 'absolute',
+          top: 16,
+          right: 16,
+          zIndex: 1001,
+          width: 40,
+          height: 40,
+          borderRadius: '50%',
+          background: 'rgba(255,255,255,0.15)',
+          border: 'none',
+          color: '#fff',
+          fontSize: 22,
+          lineHeight: 1,
+        }}
+      >
+        ×
+      </button>
+      <img
+        src={url}
+        alt=""
+        onDoubleClick={handleDoubleClick}
+        draggable={false}
+        style={{
+          maxWidth: '100%',
+          maxHeight: '100%',
+          transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
+          transition: pinchState.current || panState.current ? 'none' : 'transform 0.15s ease-out',
+          cursor: scale > 1 ? 'grab' : 'zoom-in',
+        }}
+      />
+      {scale === 1 && (
+        <div
+          style={{
+            position: 'absolute',
+            bottom: 24,
+            left: 0,
+            right: 0,
+            textAlign: 'center',
+            color: 'rgba(255,255,255,0.6)',
+            fontSize: 13,
+          }}
+        >
+          Pinch or double-tap to zoom
+        </div>
+      )}
+    </div>
   );
 }

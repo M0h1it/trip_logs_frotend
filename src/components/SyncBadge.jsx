@@ -6,6 +6,7 @@ export default function SyncBadge() {
   const [online, setOnline] = useState(navigator.onLine);
   const [syncing, setSyncing] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
+  const [errorCount, setErrorCount] = useState(0);
 
   useEffect(() => {
     const goOnline = () => setOnline(true);
@@ -18,7 +19,11 @@ export default function SyncBadge() {
     let cancelled = false;
     async function refreshCount() {
       const n = await db.entries.where('syncStatus').equals('pending').count();
-      if (!cancelled) setPendingCount(n);
+      const e = await db.entries.where('syncStatus').equals('error').count();
+      if (!cancelled) {
+        setPendingCount(n);
+        setErrorCount(e);
+      }
     }
     refreshCount();
     const interval = setInterval(refreshCount, 3000);
@@ -32,13 +37,22 @@ export default function SyncBadge() {
     };
   }, []);
 
+  const unsyncedCount = pendingCount + errorCount;
+
   let label, dotColor;
   if (!online) {
-    label = pendingCount > 0 ? `Offline · ${pendingCount} to sync` : 'Offline';
+    label = unsyncedCount > 0 ? `Offline · ${unsyncedCount} to sync` : 'Offline';
     dotColor = 'var(--ink-dim)';
   } else if (syncing) {
     label = 'Syncing…';
     dotColor = 'var(--accent)';
+  } else if (errorCount > 0) {
+    // Distinct from plain "pending" — these are entries that already tried
+    // and failed at least once. They WILL be retried automatically (same
+    // as pending ones), but calling this out separately means a genuinely
+    // stuck entry doesn't hide behind a reassuring "pending" label forever.
+    label = `${errorCount} sync error${errorCount > 1 ? 's' : ''}`;
+    dotColor = 'var(--error)';
   } else if (pendingCount > 0) {
     label = `${pendingCount} pending`;
     dotColor = 'var(--warn)';
