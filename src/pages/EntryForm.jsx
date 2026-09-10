@@ -2,7 +2,7 @@ import { useState } from 'react';
 import PhotoCapture from '../components/PhotoCapture';
 import PriceTiers from '../components/PriceTiers';
 import { createEntry, savePhoto, generateLocalId } from '../lib/db';
-import { extractCardDetails, extractProductDetails } from '../lib/ocr';
+import { extractCardDetails } from '../lib/ocr';
 import { runSync } from '../lib/sync';
 
 const emptyForm = {
@@ -12,7 +12,6 @@ const emptyForm = {
   email: '',
   wechat: '',
   address: '',
-  priceTiers: [],
   remarks: '',
 };
 
@@ -23,11 +22,16 @@ export default function EntryForm({ onSaved }) {
   // temp key (not the same as the eventual IndexedDB photoId) so we can
   // add/remove before anything is persisted.
   const [cardPhotos, setCardPhotos] = useState([]);
-  const [productPhotos, setProductPhotos] = useState([]);
+
+  // Each product is its own record: a photo plus ITS OWN price tiers and
+  // remark, since a single meeting can involve several different products
+  // at different prices — a shared price/remarks box for all of them
+  // doesn't work once there's more than one.
+  // Shape: { id, blob, url, priceTiers: [], remarks: '', ocrStatus }
+  const [products, setProducts] = useState([]);
 
   const [ocrStatus, setOcrStatus] = useState(''); // '', 'running', 'done', 'error', 'offline'
   const [ocrError, setOcrError] = useState('');
-  const [productOcrStatus, setProductOcrStatus] = useState('');
 
   const [saving, setSaving] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
@@ -89,33 +93,20 @@ export default function EntryForm({ onSaved }) {
     });
   }
 
-  async function handleProductAdd(blob) {
+  function handleProductAdd(blob) {
+    // No OCR here — product photos are saved as-is; price and remarks are
+    // always filled in manually. Only card photos trigger a Gemini call.
     const id = generateLocalId();
     const url = URL.createObjectURL(blob);
-    setProductPhotos((prev) => [...prev, { id, blob, url }]);
+    setProducts((prev) => [...prev, { id, blob, url, priceTiers: [], remarks: '' }]);
+  }
 
-    if (!navigator.onLine) {
-      setProductOcrStatus('offline');
-      return;
-    }
-    setProductOcrStatus('running');
-    try {
-      const details = await extractProductDetails(blob);
-      if (details.notes) {
-        setForm((f) => ({
-          ...f,
-          remarks: f.remarks ? `${f.remarks}\n${details.notes}` : details.notes,
-        }));
-      }
-      setProductOcrStatus('done');
-    } catch (err) {
-      console.error(err);
-      setProductOcrStatus('error');
-    }
+  function updateProduct(id, changes) {
+    setProducts((prev) => prev.map((p) => (p.id === id ? { ...p, ...changes } : p)));
   }
 
   function handleProductRemove(id) {
-    setProductPhotos((prev) => {
+    setProducts((prev) => {
       const target = prev.find((p) => p.id === id);
       if (target) URL.revokeObjectURL(target.url);
       return prev.filter((p) => p.id !== id);
@@ -128,14 +119,23 @@ export default function EntryForm({ onSaved }) {
       const cardPhotoIds = [];
       for (const photo of cardPhotos) cardPhotoIds.push(await savePhoto(photo.blob));
 
-      const productPhotoIds = [];
-      for (const photo of productPhotos) productPhotoIds.push(await savePhoto(photo.blob));
+      const savedProducts = [];
+      for (const product of products) {
+        const photoId = await savePhoto(product.blob);
+        savedProducts.push({
+          id: product.id,
+          photoId,
+          photoPath: null,
+          priceTiers: product.priceTiers,
+          remarks: product.remarks,
+        });
+      }
 
       await createEntry({
         ...form,
         phones: form.phones.map((p) => p.trim()).filter(Boolean),
         cardPhotoIds,
-        productPhotoIds,
+        products: savedProducts,
         needsOcr: ocrStatus === 'offline' || ocrStatus === 'error',
       });
 
@@ -147,11 +147,10 @@ export default function EntryForm({ onSaved }) {
       // reset for next entry
       setForm(emptyForm);
       cardPhotos.forEach((p) => URL.revokeObjectURL(p.url));
-      productPhotos.forEach((p) => URL.revokeObjectURL(p.url));
+      products.forEach((p) => URL.revokeObjectURL(p.url));
       setCardPhotos([]);
-      setProductPhotos([]);
+      setProducts([]);
       setOcrStatus('');
-      setProductOcrStatus('');
 
       onSaved?.();
     } finally {
@@ -164,7 +163,7 @@ export default function EntryForm({ onSaved }) {
     form.companyName.trim() ||
     form.phones.some((p) => p.trim()) ||
     cardPhotos.length ||
-    productPhotos.length;
+    products.length;
 
   return (
     <div className="page-container-wide" style={{ paddingBottom: 110 }}>
@@ -206,27 +205,29 @@ export default function EntryForm({ onSaved }) {
           </Section>
         </div>
 
-        {/* Right column: product, pricing, remarks */}
+        {/* Right column: products (each with its own photo, price, remark), then general meeting notes */}
         <div>
-          <Section title="Product">
-            <PhotoCapture
-              label="Photos of the product"
-              photos={productPhotos}
-              maxPhotos={5}
-              onAdd={handleProductAdd}
-              onRemove={handleProductRemove}
-            />
-            {productOcrStatus === 'running' && <StatusLine tone="info">Reading label…</StatusLine>}
-            {productOcrStatus === 'offline' && (
-              <StatusLine tone="warn">Offline — photo saved, no auto-read.</StatusLine>
-            )}
-          </Section>
+          <Section title="Products">
+            <p style={{ fontSize: 13, color: 'var(--ink-dim)', margin: '0 0 12px' }}>
+              Add a photo for each product discussed. Each one gets its own price and remark below it.
+            </p>
 
-          <Section title="Pricing">
-            <PriceTiers tiers={form.priceTiers} onChange={(v) => setField('priceTiers', v)} />
+            {products.map((product) => (
+              <ProductCard
+                key={product.id}
+                product={product}
+                onChange={(changes) => updateProduct(product.id, changes)}
+                onRemove={() => handleProductRemove(product.id)}
+              />
+            ))}
+
+            <AddProductPhoto onAdd={handleProductAdd} disabled={products.length >= 8} />
           </Section>
 
           <Section title="Remarks">
+            <p style={{ fontSize: 12, color: 'var(--ink-dim)', margin: '0 0 8px' }}>
+              General notes about this meeting — not tied to a specific product.
+            </p>
             <textarea
               rows={4}
               placeholder="Anything else worth remembering about this meeting…"
@@ -276,6 +277,91 @@ export default function EntryForm({ onSaved }) {
         </div>
       </div>
     </div>
+  );
+}
+
+// One product photo with its own inline price tiers and remark field,
+// collapsed into a single card so it's visually clear each block of
+// price/remarks belongs to the photo directly above it.
+function ProductCard({ product, onChange, onRemove }) {
+  return (
+    <div
+      style={{
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius)',
+        padding: 12,
+        marginBottom: 12,
+        background: 'var(--surface)',
+      }}
+    >
+      <div style={{ display: 'flex', gap: 10, marginBottom: 10, alignItems: 'flex-start' }}>
+        <img
+          src={product.url}
+          alt=""
+          style={{
+            width: 64,
+            height: 64,
+            objectFit: 'cover',
+            borderRadius: 'var(--radius-sm)',
+            border: '1px solid var(--border)',
+            flexShrink: 0,
+          }}
+        />
+        <div style={{ flex: 1 }} />
+        <button
+          type="button"
+          onClick={onRemove}
+          aria-label="Remove product"
+          style={{
+            background: 'var(--surface-raised)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-sm)',
+            width: 32,
+            height: 32,
+            flexShrink: 0,
+            color: 'var(--error)',
+            fontSize: 16,
+            lineHeight: 1,
+          }}
+        >
+          ×
+        </button>
+      </div>
+
+      <PriceTiers tiers={product.priceTiers} onChange={(v) => onChange({ priceTiers: v })} />
+
+      <div style={{ marginTop: 10 }}>
+        <label style={{ display: 'block', fontSize: 12, color: 'var(--ink-dim)', marginBottom: 4 }}>
+          Remark for this product
+        </label>
+        <textarea
+          rows={2}
+          placeholder="Notes about this specific product…"
+          value={product.remarks}
+          onChange={(e) => onChange({ remarks: e.target.value })}
+        />
+      </div>
+    </div>
+  );
+}
+
+// The "add a new product" control — reuses PhotoCapture's single-photo
+// capture UI but fires once per photo (onAdd creates a whole new product
+// card each time), rather than accumulating into one shared photo list.
+function AddProductPhoto({ onAdd, disabled }) {
+  if (disabled) {
+    return (
+      <StatusLine tone="warn">Maximum of 8 products per entry reached.</StatusLine>
+    );
+  }
+  return (
+    <PhotoCapture
+      label="Add a product photo"
+      photos={[]}
+      maxPhotos={1}
+      onAdd={onAdd}
+      onRemove={() => {}}
+    />
   );
 }
 

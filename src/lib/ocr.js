@@ -25,14 +25,6 @@ Extract the following fields and respond with ONLY a raw JSON object, no markdow
 }
 If a field is not found on the card, use an empty string for it (or an empty array for phones). If the card is in Chinese, keep names/companies in Chinese characters (do not translate), but you may include pinyin in parentheses if helpful. Do not invent information that is not on the card.`;
 
-const PRODUCT_PROMPT = `You are looking at a photo of a product, possibly with a label, tag, or spec sheet showing pricing.
-Respond with ONLY a raw JSON object, no markdown fences:
-{
-  "productName": "short product name/description if visible",
-  "notes": "any visible specs, model numbers, or pricing text found in the image"
-}
-If nothing relevant is visible, use empty strings.`;
-
 async function callGemini(base64Image, prompt) {
   if (!GEMINI_API_KEY) {
     throw new Error('Gemini API key not configured. Add VITE_GEMINI_API_KEY to your .env file.');
@@ -79,7 +71,6 @@ export async function extractCardDetails(imageBlob) {
   return callGemini(base64, CARD_PROMPT);
 }
 
-export async function extractProductDetails(imageBlob) {
-  const base64 = await blobToBase64(imageBlob);
-  return callGemini(base64, PRODUCT_PROMPT);
-}
+// Note: there is intentionally no extractProductDetails/product OCR call —
+// product photos are saved as-is. Only business card photos trigger a
+// Gemini call; price and remarks for products are always entered manually.

@@ -24,9 +24,8 @@ async function syncOneEntry(entry) {
   formData.append('address', entry.address || '');
   formData.append('remarks', entry.remarks || '');
   formData.append('entryDate', entry.entryDate);
-  formData.append('priceTiers', JSON.stringify(entry.priceTiers || []));
 
-  // Only attach photo files if we haven't already uploaded them in a
+  // Only attach card photo files if we haven't already uploaded them in a
   // previous (possibly partially-failed) sync attempt — re-attach by path
   // reference instead, so retries don't re-upload large files needlessly.
   const alreadyUploadedCardPaths = entry.cardPhotoPaths || [];
@@ -39,22 +38,66 @@ async function syncOneEntry(entry) {
     formData.append('cardPhotoPaths', JSON.stringify(alreadyUploadedCardPaths));
   }
 
-  const alreadyUploadedProductPaths = entry.productPhotoPaths || [];
-  if (entry.productPhotoIds?.length && alreadyUploadedProductPaths.length < entry.productPhotoIds.length) {
-    for (const pid of entry.productPhotoIds) {
-      const photoRecord = await db.photos.get(pid);
-      if (photoRecord) formData.append('productPhoto', photoRecord.blob, `product-${pid}.jpg`);
+  // Each product carries its own photo + price/remarks. productsMeta tells
+  // the backend, in order, which products need a fresh photo upload (their
+  // corresponding file is attached as productPhoto, in the same order) vs
+  // which already have a photo on the server (existingPhotoPath is reused,
+  // no re-upload needed).
+  const products = entry.products || [];
+  const productsMeta = [];
+  for (const product of products) {
+    if (product.photoPath) {
+      // Already synced before — nothing new to upload for this one.
+      productsMeta.push({
+        hasNewPhoto: false,
+        existingPhotoPath: product.photoPath,
+        priceTiers: product.priceTiers || [],
+        remarks: product.remarks || '',
+      });
+    } else if (product.photoId) {
+      const photoRecord = await db.photos.get(product.photoId);
+      if (photoRecord) {
+        formData.append('productPhoto', photoRecord.blob, `product-${product.photoId}.jpg`);
+        productsMeta.push({
+          hasNewPhoto: true,
+          priceTiers: product.priceTiers || [],
+          remarks: product.remarks || '',
+        });
+      } else {
+        // Blob went missing locally somehow — still preserve the
+        // price/remarks rather than silently dropping this product.
+        productsMeta.push({
+          hasNewPhoto: false,
+          existingPhotoPath: null,
+          priceTiers: product.priceTiers || [],
+          remarks: product.remarks || '',
+        });
+      }
+    } else {
+      productsMeta.push({
+        hasNewPhoto: false,
+        existingPhotoPath: null,
+        priceTiers: product.priceTiers || [],
+        remarks: product.remarks || '',
+      });
     }
-  } else if (alreadyUploadedProductPaths.length) {
-    formData.append('productPhotoPaths', JSON.stringify(alreadyUploadedProductPaths));
   }
+  formData.append('productsMeta', JSON.stringify(productsMeta));
 
   const saved = await api.upsertEntry(formData);
+
+  // Merge the server's confirmed photoPaths back into local product
+  // records (matched by position, same order sent) so a future sync retry
+  // recognizes these as already-uploaded and doesn't re-send the files.
+  const mergedProducts = products.map((product, i) => ({
+    ...product,
+    photoPath: saved.products?.[i]?.photoPath || product.photoPath || null,
+  }));
 
   await db.entries.update(entry.id, {
     syncStatus: 'synced',
     cardPhotoPaths: saved.cardPhotoPaths,
-    productPhotoPaths: saved.productPhotoPaths,
+    products: mergedProducts,
   });
 }
 

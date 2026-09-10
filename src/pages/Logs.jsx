@@ -243,11 +243,21 @@ function EntryCard({ entry, onClick }) {
 
 function EntryDetail({ entry, onBack, onDeleted }) {
   const [cardUrls, setCardUrls] = useState([]);
-  const [productUrls, setProductUrls] = useState([]);
+  // Resolved products: [{ url, priceTiers, remarks }], photo URL resolved
+  // from either a local blob (on this device) or the server path (synced
+  // from elsewhere), same fallback pattern used for card photos.
+  const [resolvedProducts, setResolvedProducts] = useState([]);
 
   useEffect(() => {
     let cancelled = false;
     const urls = [];
+
+    // Reset before repopulating — this effect can re-run (entry changes,
+    // React StrictMode double-invoking in dev, etc.), and without this the
+    // previous run's results stay in state while the new run appends on
+    // top, silently duplicating every photo/product shown.
+    setCardUrls([]);
+    setResolvedProducts([]);
 
     async function loadAll() {
       if (entry.cardPhotoIds?.length) {
@@ -268,18 +278,23 @@ function EntryDetail({ entry, onBack, onDeleted }) {
         }
       }
 
-      if (entry.productPhotoIds?.length) {
-        for (const pid of entry.productPhotoIds) {
-          const blob = await getPhoto(pid);
-          if (blob && !cancelled) {
-            const url = URL.createObjectURL(blob);
+      for (const product of entry.products || []) {
+        let url = null;
+        if (product.photoId) {
+          const blob = await getPhoto(product.photoId);
+          if (blob) {
+            url = URL.createObjectURL(blob);
             urls.push(url);
-            setProductUrls((prev) => [...prev, url]);
           }
         }
-      } else if (entry.productPhotoPaths?.length) {
-        for (const relPath of entry.productPhotoPaths) {
-          if (!cancelled) setProductUrls((prev) => [...prev, api.photoUrl(relPath)]);
+        if (!url && product.photoPath) {
+          url = api.photoUrl(product.photoPath);
+        }
+        if (!cancelled) {
+          setResolvedProducts((prev) => [
+            ...prev,
+            { url, priceTiers: product.priceTiers || [], remarks: product.remarks || '' },
+          ]);
         }
       }
     }
@@ -333,34 +348,46 @@ function EntryDetail({ entry, onBack, onDeleted }) {
         <DetailGrid entry={entry} />
       </div>
 
-      {productUrls.length > 0 && (
+      {resolvedProducts.length > 0 && (
         <div style={{ marginTop: 16 }}>
-          <SectionLabel>Product {productUrls.length > 1 ? `(${productUrls.length} photos)` : ''}</SectionLabel>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 8 }}>
-            {productUrls.map((url, i) => (
-              <img key={i} src={url} alt="Product" style={{ width: '100%', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }} />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {entry.priceTiers?.length > 0 && (
-        <div style={{ marginTop: 16 }}>
-          <SectionLabel>Pricing</SectionLabel>
-          <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', overflow: 'hidden' }}>
-            {entry.priceTiers.map((t, i) => (
+          <SectionLabel>Products ({resolvedProducts.length})</SectionLabel>
+          <div style={{ display: 'grid', gap: 10 }}>
+            {resolvedProducts.map((product, i) => (
               <div
                 key={i}
                 style={{
+                  background: 'var(--surface)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius)',
+                  padding: 12,
                   display: 'flex',
-                  justifyContent: 'space-between',
-                  padding: '10px 14px',
-                  borderTop: i > 0 ? '1px solid var(--border)' : 'none',
-                  fontSize: 14,
+                  gap: 12,
                 }}
               >
-                <span style={{ color: 'var(--ink-dim)' }}>{t.quantity} units</span>
-                <span>{t.price}</span>
+                {product.url && (
+                  <img
+                    src={product.url}
+                    alt="Product"
+                    style={{ width: 72, height: 72, objectFit: 'cover', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', flexShrink: 0 }}
+                  />
+                )}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  {product.priceTiers.length > 0 ? (
+                    <div style={{ marginBottom: product.remarks ? 6 : 0 }}>
+                      {product.priceTiers.map((t, ti) => (
+                        <div key={ti} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                          <span style={{ color: 'var(--ink-dim)' }}>{t.quantity} units</span>
+                          <span>{t.price}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 13, color: 'var(--ink-dim)' }}>No price set</div>
+                  )}
+                  {product.remarks && (
+                    <p style={{ fontSize: 13, margin: 0, whiteSpace: 'pre-wrap' }}>{product.remarks}</p>
+                  )}
+                </div>
               </div>
             ))}
           </div>
@@ -369,7 +396,7 @@ function EntryDetail({ entry, onBack, onDeleted }) {
 
       {entry.remarks && (
         <div style={{ marginTop: 16 }}>
-          <SectionLabel>Remarks</SectionLabel>
+          <SectionLabel>Meeting notes</SectionLabel>
           <p style={{ fontSize: 14, lineHeight: 1.5, whiteSpace: 'pre-wrap', margin: 0 }}>{entry.remarks}</p>
         </div>
       )}

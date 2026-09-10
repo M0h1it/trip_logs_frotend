@@ -44,8 +44,9 @@ export async function createEntry(entry) {
     wechat: entry.wechat || '',
     address: entry.address || '',
     cardPhotoIds: entry.cardPhotoIds || [],
-    productPhotoIds: entry.productPhotoIds || [],
-    priceTiers: entry.priceTiers || [],
+    // Each element: { id, photoId (local blob ref), photoPath (server path
+    // once synced), priceTiers: [{quantity,price,unit}], remarks }
+    products: entry.products || [],
     remarks: entry.remarks || '',
     entryDate: entry.entryDate || localDateStr(),
     createdAt: now,
@@ -69,7 +70,9 @@ export async function deleteEntry(id) {
   const entry = await db.entries.get(id);
   if (entry) {
     for (const pid of entry.cardPhotoIds || []) await db.photos.delete(pid);
-    for (const pid of entry.productPhotoIds || []) await db.photos.delete(pid);
+    for (const product of entry.products || []) {
+      if (product.photoId) await db.photos.delete(product.photoId);
+    }
   }
   await db.entries.delete(id);
 }
@@ -121,13 +124,19 @@ export async function upsertEntryFromServer(serverEntry) {
     wechat: serverEntry.wechat || '',
     address: serverEntry.address || '',
     // Server-sourced photos: no local blob, just the remote path to fetch
-    // from the API when displaying. Kept separate from cardPhotoIds/
-    // productPhotoIds (local blob references) so the UI knows which to use.
+    // from the API when displaying. Kept separate from cardPhotoIds so the
+    // UI knows which to use. For products, match up any already-known
+    // local photoIds by position so a re-pull doesn't orphan a photo this
+    // device already has locally but hasn't synced the price/remarks for.
     cardPhotoIds: existing?.cardPhotoIds || [],
-    productPhotoIds: existing?.productPhotoIds || [],
     cardPhotoPaths: serverEntry.cardPhotoPaths || [],
-    productPhotoPaths: serverEntry.productPhotoPaths || [],
-    priceTiers: serverEntry.priceTiers || [],
+    products: (serverEntry.products || []).map((p, i) => ({
+      id: existing?.products?.[i]?.id || generateLocalId(),
+      photoId: existing?.products?.[i]?.photoId || null,
+      photoPath: p.photoPath || null,
+      priceTiers: p.priceTiers || [],
+      remarks: p.remarks || '',
+    })),
     remarks: serverEntry.remarks || '',
     entryDate: serverEntry.entryDate,
     createdAt: serverEntry.createdAt || new Date().toISOString(),
